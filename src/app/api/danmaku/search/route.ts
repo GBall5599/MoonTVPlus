@@ -2,14 +2,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
-import { getDanmakuApiBaseUrl } from '@/lib/danmaku/config';
+import { danmakuFailureMessage, fetchFromDanmaku } from '@/lib/danmaku/proxy';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
-    const keyword = searchParams.get('keyword');
+    const keyword = request.nextUrl.searchParams.get('keyword');
 
     if (!keyword) {
       return NextResponse.json(
@@ -23,44 +22,39 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 从数据库读取弹幕配置
+    // 从数据库读取弹幕配置，交给带备用源降级的代理（见 lib/danmaku/proxy.ts）
     const config = await getConfig();
-    const baseUrl = getDanmakuApiBaseUrl(config.SiteConfig);
+    const result = await fetchFromDanmaku(
+      config.SiteConfig,
+      `/api/v2/search/anime?keyword=${encodeURIComponent(keyword)}`,
+      { timeoutMs: 12000, label: '搜索' }
+    );
 
-    const apiUrl = `${baseUrl}/api/v2/search/anime?keyword=${encodeURIComponent(keyword)}`;
-
-    // 添加超时控制
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 10秒超时
+    if (!result.ok) {
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: danmakuFailureMessage(result),
+          animes: [],
+        },
+        { status: 502 }
+      );
+    }
 
     try {
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
+      return NextResponse.json(JSON.parse(result.text));
+    } catch {
+      console.error(`[弹幕] 搜索：${result.sourceOrigin} 返回的不是 JSON`);
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: '弹幕服务返回了非 JSON 内容',
+          animes: [],
         },
-        signal: controller.signal,
-        keepalive: true,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      return NextResponse.json(data);
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-
-      // 如果是超时错误，返回更友好的错误信息
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        throw new Error('弹幕服务器请求超时，请稍后重试');
-      }
-
-      throw fetchError;
+        { status: 502 }
+      );
     }
   } catch (error) {
     console.error('弹幕搜索代理错误:', error);

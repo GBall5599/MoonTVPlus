@@ -4,7 +4,12 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getConfig } from '@/lib/config';
-import { searchFromApi } from '@/lib/downstream';
+import {
+  buildWeightMap,
+  getFanoutSettings,
+  runSourceFanout,
+  sortSitesByPriority,
+} from '@/lib/search-fanout';
 import { hasFeaturePermission } from '@/lib/permissions';
 import { yellowWords } from '@/lib/yellow';
 import { getProxyToken } from '@/lib/emby-token';
@@ -50,17 +55,18 @@ export async function GET(request: NextRequest) {
   ]);
 
   // 创建权重映射表
-  const weightMap = new Map<string, number>();
-  config.SourceConfig.forEach(source => {
-    weightMap.set(source.key, source.weight ?? 0);
-  });
+  const weightMap = buildWeightMap(config.SourceConfig);
 
-  // 按权重降序排序 apiSites
-  const sortedApiSites = [...apiSites].sort((a, b) => {
-    const weightA = weightMap.get(a.key) ?? 0;
-    const weightB = weightMap.get(b.key) ?? 0;
-    return weightB - weightA;
-  });
+  // 按优先级排序：手动权重降序 → 原始顺序。权重就是"先检测谁"的显式开关。
+  const sortedApiSites = sortSitesByPriority(apiSites, weightMap);
+
+  // 调度参数：受控并发 + 够用即停
+  const fanoutSettings = await getFanoutSettings();
+  console.log(
+    `[Search WS] 调度参数 并发=${fanoutSettings.concurrency} ` +
+      `早停=${fanoutSettings.earlyStop} 命中源≥${fanoutSettings.minHitSources} ` +
+      `或结果≥${fanoutSettings.minResults}｜源数=${sortedApiSites.length}`
+  );
 
   // 检查是否配置了 OpenList
   const hasOpenList = !!(
@@ -82,6 +88,8 @@ export async function GET(request: NextRequest) {
 
   // 共享状态
   let streamClosed = false;
+  // 客户端断开时用它掐掉在途的源请求
+  const clientAbort = new AbortController();
 
   // 创建可读流
   const stream = new ReadableStream({
@@ -135,12 +143,28 @@ export async function GET(request: NextRequest) {
       let completedSources = 0;
       const allResults: any[] = [];
 
-      const maybeComplete = () => {
-        if (completedSources !== totalSourceCount || streamClosed) return;
+      /**
+       * 收尾：推送 complete 并关闭流。
+       * reason: 'all' = 所有源都检测完了；'enough' = 够用即停，后面的源没检测。
+       */
+      const finish = (
+        reason: 'all' | 'enough',
+        extra?: {
+          scannedSources?: number;
+          skippedSources?: number;
+          hitSources?: number;
+          elapsedMs?: number;
+        }
+      ) => {
+        if (streamClosed) return;
         const completeEvent = `data: ${JSON.stringify({
           type: 'complete',
           totalResults: allResults.length,
           completedSources,
+          totalSources: totalSourceCount,
+          stopped: reason === 'enough',
+          stopReason: reason,
+          ...(extra || {}),
           timestamp: Date.now()
         })}\n\n`;
 
@@ -152,6 +176,11 @@ export async function GET(request: NextRequest) {
             console.warn('Failed to close controller:', error);
           }
         }
+      };
+
+      const maybeComplete = () => {
+        if (completedSources !== totalSourceCount || streamClosed) return;
+        finish('all');
       };
 
       if (totalSourceCount === 0) {
@@ -361,19 +390,19 @@ export async function GET(request: NextRequest) {
           });
       }
 
-      // 为每个源创建搜索 Promise
-      const searchPromises = sortedApiSites.map(async (site) => {
-        try {
-          // 添加超时控制
-          const searchPromise = Promise.race([
-            searchFromApi(site, query),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error(`${site.name} timeout`)), 20000)
-            ),
-          ]);
-
-          const results = await searchPromise as any[];
-
+      /**
+       * API 源：受控并发 + 够用即停。
+       * 每检测完一个源就推一条 source_result；一旦命中源数/结果数达标，
+       * runSourceFanout 会立刻中止在途请求并停止派发后面的源。
+       */
+      const apiFanoutPromise = runSourceFanout({
+        sites: sortedApiSites,
+        query,
+        concurrency: fanoutSettings.concurrency,
+        minHitSources: fanoutSettings.minHitSources,
+        minResults: fanoutSettings.minResults,
+        signal: clientAbort.signal,
+        onSourceDone: ({ key, name, results, error }) => {
           // 添加安全检查，确保结果是数组
           const safeResults = Array.isArray(results) ? results : [];
 
@@ -391,72 +420,48 @@ export async function GET(request: NextRequest) {
             weight: result.weight ?? (weightMap.get(result.source) ?? 0),
           }));
 
-          // 发送该源的搜索结果
           completedSources++;
 
-          if (!streamClosed) {
-            const sourceEvent = `data: ${JSON.stringify({
-              type: 'source_result',
-              source: site.key,
-              sourceName: site.name,
-              results: filteredResults,
-              timestamp: Date.now()
-            })}\n\n`;
+          if (streamClosed) return;
 
-            if (!safeEnqueue(encoder.encode(sourceEvent))) {
-              streamClosed = true;
-              return; // 连接已关闭，停止处理
-            }
+          const payload =
+            error !== undefined && filteredResults.length === 0
+              ? {
+                  type: 'source_error',
+                  source: key,
+                  sourceName: name,
+                  error,
+                  timestamp: Date.now(),
+                }
+              : {
+                  type: 'source_result',
+                  source: key,
+                  sourceName: name,
+                  results: filteredResults,
+                  timestamp: Date.now(),
+                };
+
+          if (!safeEnqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))) {
+            streamClosed = true;
+            clientAbort.abort();
+            return;
           }
 
           if (filteredResults.length > 0) {
             allResults.push(...filteredResults);
           }
-
-        } catch (error) {
-          console.warn(`搜索失败 ${site.name}:`, error);
-
-          // 发送源错误事件
-          completedSources++;
-
-          if (!streamClosed) {
-            const errorEvent = `data: ${JSON.stringify({
-              type: 'source_error',
-              source: site.key,
-              sourceName: site.name,
-              error: error instanceof Error ? error.message : '搜索失败',
-              timestamp: Date.now()
-            })}\n\n`;
-
-            if (!safeEnqueue(encoder.encode(errorEvent))) {
-              streamClosed = true;
-              return; // 连接已关闭，停止处理
-            }
-          }
+        },
+      }).then((summary) => {
+        try {
+          console.log(
+            `[Search WS] 扇出结束 「${query}」 检测=${summary.scannedSources} ` +
+              `命中源=${summary.hitSources} 结果=${summary.totalResults} ` +
+              `跳过=${summary.skippedSources} 早停=${summary.stopped} 耗时=${summary.elapsedMs}ms`
+          );
+        } catch {
+          /* 日志失败不影响结果 */
         }
-
-        // 检查是否所有源都已完成
-        if (completedSources === totalSourceCount) {
-          if (!streamClosed) {
-            // 发送最终完成事件
-            const completeEvent = `data: ${JSON.stringify({
-              type: 'complete',
-              totalResults: allResults.length,
-              completedSources,
-              timestamp: Date.now()
-            })}\n\n`;
-
-            if (safeEnqueue(encoder.encode(completeEvent))) {
-              // 只有在成功发送完成事件后才关闭流
-              streamClosed = true;
-              try {
-                controller.close();
-              } catch (error) {
-                console.warn('Failed to close controller:', error);
-              }
-            }
-          }
-        }
+        return summary;
       });
 
       const scriptPromises = enabledScripts.map(async (script) => {
@@ -549,34 +554,32 @@ export async function GET(request: NextRequest) {
           }
         }
 
-        if (completedSources === totalSourceCount) {
-          if (!streamClosed) {
-            const completeEvent = `data: ${JSON.stringify({
-              type: 'complete',
-              totalResults: allResults.length,
-              completedSources,
-              timestamp: Date.now()
-            })}\n\n`;
-
-            if (safeEnqueue(encoder.encode(completeEvent))) {
-              streamClosed = true;
-              try {
-                controller.close();
-              } catch (error) {
-                console.warn('Failed to close controller:', error);
-              }
-            }
-          }
-        }
+        maybeComplete();
       });
 
-      // 等待所有搜索完成
-      await Promise.allSettled([...searchPromises, ...scriptPromises]);
+      // 等 API 源扇出结束（够用即停时它会立刻收手）＋ 脚本源结束
+      const [apiSummary] = await Promise.all([
+        apiFanoutPromise,
+        Promise.allSettled(scriptPromises),
+      ]);
+
+      if (apiSummary.stopped) {
+        // 够用即停：不再等后面的源，直接收尾
+        finish('enough', {
+          scannedSources: apiSummary.scannedSources,
+          skippedSources: apiSummary.skippedSources,
+          hitSources: apiSummary.hitSources,
+          elapsedMs: apiSummary.elapsedMs,
+        });
+      } else {
+        maybeComplete();
+      }
     },
 
     cancel() {
-      // 客户端断开连接时，标记流已关闭
+      // 客户端断开连接时，标记流已关闭并掐掉在途的源请求
       streamClosed = true;
+      clientAbort.abort();
       console.log('Client disconnected, cancelling search stream');
     },
   });

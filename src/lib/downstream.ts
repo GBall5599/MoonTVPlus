@@ -20,6 +20,31 @@ interface ApiSearchItem {
 }
 
 /**
+ * 把"单页超时"信号和"调用方取消（够用即停 / 客户端断开）"信号合成一个。
+ * 任一触发都会 abort，用于立刻掐掉已经不需要的在途请求。
+ */
+function combineSignals(
+  timeoutSignal: AbortSignal,
+  external?: AbortSignal
+): AbortSignal {
+  if (!external) return timeoutSignal;
+  // Node >= 20.3 / 现代浏览器都带 AbortSignal.any
+  const anyFn = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyFn === 'function') {
+    return anyFn([timeoutSignal, external]);
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (external.aborted || timeoutSignal.aborted) {
+    controller.abort();
+    return controller.signal;
+  }
+  external.addEventListener('abort', abort, { once: true });
+  timeoutSignal.addEventListener('abort', abort, { once: true });
+  return controller.signal;
+}
+
+/**
  * 通用的带缓存搜索函数
  */
 async function searchWithCache(
@@ -27,7 +52,8 @@ async function searchWithCache(
   query: string,
   page: number,
   url: string,
-  timeoutMs = 8000
+  timeoutMs = 8000,
+  externalSignal?: AbortSignal
 ): Promise<{ results: SearchResult[]; pageCount?: number }> {
   // 先查缓存
   const cached = getCachedSearchPage(apiSite.key, query, page);
@@ -39,6 +65,11 @@ async function searchWithCache(
     }
   }
 
+  // 已经不需要这个源了，连请求都不用发
+  if (externalSignal?.aborted) {
+    return { results: [] };
+  }
+
   // 缓存未命中，发起网络请求
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -46,7 +77,7 @@ async function searchWithCache(
   try {
     const response = await fetch(url, {
       headers: API_CONFIG.search.headers,
-      signal: controller.signal,
+      signal: combineSignals(controller.signal, externalSignal),
     });
 
     clearTimeout(timeoutId);
@@ -130,6 +161,10 @@ async function searchWithCache(
     return { results, pageCount };
   } catch (error: any) {
     clearTimeout(timeoutId);
+    // 够用即停 / 客户端断开导致的取消，不算这个源"超时"，不能写负缓存
+    if (externalSignal?.aborted) {
+      return { results: [] };
+    }
     // 识别被 AbortController 中止（超时）
     const aborted = error?.name === 'AbortError' || error?.code === 20 || error?.message?.includes('aborted');
     if (aborted) {
@@ -141,7 +176,8 @@ async function searchWithCache(
 
 export async function searchFromApi(
   apiSite: ApiSite,
-  query: string
+  query: string,
+  signal?: AbortSignal
 ): Promise<SearchResult[]> {
   try {
     const apiBaseUrl = apiSite.api;
@@ -149,9 +185,14 @@ export async function searchFromApi(
       apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
 
     // 使用新的缓存搜索函数处理第一页
-    const firstPageResult = await searchWithCache(apiSite, query, 1, apiUrl, 8000);
+    const firstPageResult = await searchWithCache(apiSite, query, 1, apiUrl, 8000, signal);
     const results = firstPageResult.results;
     const pageCountFromFirst = firstPageResult.pageCount;
+
+    // 够用即停 / 客户端断开后，没必要再翻页
+    if (signal?.aborted) {
+      return results;
+    }
 
     const config = await getConfig();
     const MAX_SEARCH_PAGES: number = config.SiteConfig.SearchDownstreamMaxPage;
@@ -174,7 +215,7 @@ export async function searchFromApi(
 
         const pagePromise = (async () => {
           // 使用新的缓存搜索函数处理分页
-          const pageResult = await searchWithCache(apiSite, query, page, pageUrl, 8000);
+          const pageResult = await searchWithCache(apiSite, query, page, pageUrl, 8000, signal);
           return pageResult.results;
         })();
 

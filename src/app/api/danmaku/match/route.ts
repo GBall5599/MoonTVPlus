@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
-import { getDanmakuApiBaseUrl } from '@/lib/danmaku/config';
+import { danmakuFailureMessage, fetchFromDanmaku } from '@/lib/danmaku/proxy';
 
 export const runtime = 'nodejs';
 
@@ -24,45 +24,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 从数据库读取弹幕配置
     const config = await getConfig();
-    const baseUrl = getDanmakuApiBaseUrl(config.SiteConfig);
+    const result = await fetchFromDanmaku(config.SiteConfig, '/api/v2/match', {
+      method: 'POST',
+      body: { fileName },
+      timeoutMs: 12000,
+      label: '匹配',
+    });
 
-    const apiUrl = `${baseUrl}/api/v2/match`;
-
-    // 添加超时控制
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 10秒超时
+    if (!result.ok) {
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: danmakuFailureMessage(result),
+          isMatched: false,
+          matches: [],
+        },
+        { status: 502 }
+      );
+    }
 
     try {
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      return NextResponse.json(JSON.parse(result.text));
+    } catch {
+      console.error(`[弹幕] 匹配：${result.sourceOrigin} 返回的不是 JSON`);
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: '弹幕服务返回了非 JSON 内容',
+          isMatched: false,
+          matches: [],
         },
-        body: JSON.stringify({ fileName }),
-        signal: controller.signal,
-        keepalive: true,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      return NextResponse.json(data);
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-
-      // 如果是超时错误，返回更友好的错误信息
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        throw new Error('弹幕服务器请求超时，请稍后重试');
-      }
-
-      throw fetchError;
+        { status: 502 }
+      );
     }
   } catch (error) {
     console.error('自动匹配代理错误:', error);

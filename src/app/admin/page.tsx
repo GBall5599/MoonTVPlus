@@ -367,6 +367,10 @@ interface SiteConfig {
   DoubanImageProxy: string;
   DisableYellowFilter: boolean;
   FluidSearch: boolean;
+  SearchEarlyStop?: boolean;
+  SearchEarlyStopMinSources?: number;
+  SearchEarlyStopMinResults?: number;
+  SearchConcurrency?: number;
   DanmakuSourceType?: 'builtin' | 'custom';
   DanmakuApiBase: string;
   DanmakuApiToken: string;
@@ -10690,6 +10694,10 @@ const SiteConfigComponent = ({
     DoubanImageProxy: '',
     DisableYellowFilter: false,
     FluidSearch: true,
+    SearchEarlyStop: true,
+    SearchEarlyStopMinSources: 8,
+    SearchEarlyStopMinResults: 0,
+    SearchConcurrency: 20,
     DanmakuSourceType: 'builtin',
     DanmakuApiBase: 'https://mtvpls-danmu.netlify.app/87654321',
     DanmakuApiToken: '87654321',
@@ -10814,6 +10822,12 @@ const SiteConfigComponent = ({
         DoubanImageProxy: config.SiteConfig.DoubanImageProxy || '',
         DisableYellowFilter: config.SiteConfig.DisableYellowFilter || false,
         FluidSearch: config.SiteConfig.FluidSearch || true,
+        SearchEarlyStop: config.SiteConfig.SearchEarlyStop !== false,
+        SearchEarlyStopMinSources:
+          config.SiteConfig.SearchEarlyStopMinSources ?? 8,
+        SearchEarlyStopMinResults:
+          config.SiteConfig.SearchEarlyStopMinResults ?? 0,
+        SearchConcurrency: config.SiteConfig.SearchConcurrency ?? 20,
         DanmakuSourceType: config.SiteConfig.DanmakuSourceType || 'custom',
         DanmakuApiBase:
           config.SiteConfig.DanmakuApiBase || 'http://localhost:9321',
@@ -11377,6 +11391,122 @@ const SiteConfigComponent = ({
         </div>
         <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
           启用后搜索结果将实时流式返回,提升用户体验。
+        </p>
+      </div>
+
+      {/* 够用即停 */}
+      <div className='space-y-4 rounded-lg border border-gray-200 p-4 dark:border-gray-700'>
+        <div>
+          <div className='flex items-center justify-between'>
+            <label className='block text-sm font-medium text-gray-700 dark:text-gray-300'>
+              够用即停（检测到足够的源就收手）
+            </label>
+            <button
+              type='button'
+              onClick={() =>
+                setSiteSettings((prev) => ({
+                  ...prev,
+                  SearchEarlyStop: prev.SearchEarlyStop === false,
+                }))
+              }
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+                siteSettings.SearchEarlyStop !== false
+                  ? buttonStyles.toggleOn
+                  : buttonStyles.toggleOff
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full ${
+                  buttonStyles.toggleThumb
+                } transition-transform ${
+                  siteSettings.SearchEarlyStop !== false
+                    ? buttonStyles.toggleThumbOn
+                    : buttonStyles.toggleThumbOff
+                }`}
+              />
+            </button>
+          </div>
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            开启后，命中「可用源数」或「结果条数」任一阈值就立即停止检测后面的源，
+            并把在途请求掐掉。手机端等待时间将从「最慢的源」变成「够用的那一刻」。
+            关闭则恢复成把全部启用源都检测一遍（慢，但结果最全）。
+          </p>
+        </div>
+
+        {siteSettings.SearchEarlyStop !== false && (
+          <div className='grid grid-cols-1 gap-4 sm:grid-cols-3'>
+            <div>
+              <label className='mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300'>
+                命中多少个源算够用
+              </label>
+              <input
+                type='number'
+                min={1}
+                max={200}
+                value={siteSettings.SearchEarlyStopMinSources ?? 8}
+                onChange={(e) =>
+                  setSiteSettings((prev) => ({
+                    ...prev,
+                    SearchEarlyStopMinSources: Number(e.target.value),
+                  }))
+                }
+                className='w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-transparent focus:ring-2 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100'
+              />
+              <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                默认 8。有 8 个源都搜到了这部片子，通常已经够选了。
+              </p>
+            </div>
+            <div>
+              <label className='mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300'>
+                或攒够多少条结果算够用
+              </label>
+              <input
+                type='number'
+                min={0}
+                max={10000}
+                value={siteSettings.SearchEarlyStopMinResults ?? 0}
+                onChange={(e) =>
+                  setSiteSettings((prev) => ({
+                    ...prev,
+                    SearchEarlyStopMinResults: Number(e.target.value),
+                  }))
+                }
+                className='w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-transparent focus:ring-2 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100'
+              />
+              <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                默认 <strong>0 = 不看这一项</strong>，只按上面的「命中多少个源」收手。
+                填了数值则与上一项是「或」关系，谁先满足就停 —— 注意有条数虚高的源
+                （对任何词都能返回几百条），填小了会被它一个人顶满、导致提前收手。
+              </p>
+            </div>
+            <div>
+              <label className='mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300'>
+                同时检测多少个源
+              </label>
+              <input
+                type='number'
+                min={1}
+                max={500}
+                value={siteSettings.SearchConcurrency ?? 20}
+                onChange={(e) =>
+                  setSiteSettings((prev) => ({
+                    ...prev,
+                    SearchConcurrency: Number(e.target.value),
+                  }))
+                }
+                className='w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-transparent focus:ring-2 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100'
+              />
+              <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                默认 20。必须是个有限值——不限并发的话所有源同时出发，
+                「优先级」就失去意义了（第几个命中跟排序无关）。
+              </p>
+            </div>
+          </div>
+        )}
+
+        <p className='text-xs text-gray-500 dark:text-gray-400'>
+          检测顺序 = 「权重管理」里的权重降序 → 源列表顺序。想固定让某些源先被检测，
+          去源管理里把它们的权重调高即可。
         </p>
       </div>
 

@@ -111,6 +111,12 @@ function SearchPageClient() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const [totalSources, setTotalSources] = useState(0);
   const [completedSources, setCompletedSources] = useState(0);
+  // 「够用即停」命中后记下扫描/跳过情况，进度条据此显示"提前结束"而不是卡在 12/155
+  const [earlyStopInfo, setEarlyStopInfo] = useState<{
+    scanned: number;
+    total: number;
+    skipped: number;
+  } | null>(null);
   const pendingResultsRef = useRef<SearchResult[]>([]);
   const flushTimerRef = useRef<number | null>(null);
   const [useFluidSearch, setUseFluidSearch] = useState(true);
@@ -1314,6 +1320,7 @@ function SearchPageClient() {
       setSearchResults([]);
       setTotalSources(0);
       setCompletedSources(0);
+      setEarlyStopInfo(null);
       // 清理缓冲
       pendingResultsRef.current = [];
       if (flushTimerRef.current) {
@@ -1390,7 +1397,21 @@ function SearchPageClient() {
                 setCompletedSources((prev) => prev + 1);
                 break;
               case 'complete':
-                setCompletedSources(payload.completedSources || totalSources);
+                if (payload.stopped) {
+                  // 够用即停：服务端主动收手，把进度条按"已扫描"收口
+                  const scanned =
+                    payload.scannedSources ?? payload.completedSources ?? 0;
+                  const declaredTotal = payload.totalSources ?? totalSources;
+                  setCompletedSources(scanned);
+                  setTotalSources(scanned);
+                  setEarlyStopInfo({
+                    scanned,
+                    total: declaredTotal,
+                    skipped: payload.skippedSources ?? 0,
+                  });
+                } else {
+                  setCompletedSources(payload.completedSources || totalSources);
+                }
                 // 完成前确保将缓冲写入
                 if (pendingResultsRef.current.length > 0) {
                   const toAppend = pendingResultsRef.current;
@@ -2086,7 +2107,19 @@ function SearchPageClient() {
                           </span>
                           {!isFromCache && totalSources > 0 && useFluidSearch && (
                             <span className='inline-flex items-center gap-1'>
-                              源 {completedSources}/{totalSources}
+                              {earlyStopInfo ? (
+                                <span
+                                  className='text-green-600 dark:text-green-400'
+                                  title={`还有 ${earlyStopInfo.skipped} 个源未检测`}
+                                >
+                                  已检测 {earlyStopInfo.scanned}/
+                                  {earlyStopInfo.total} 个源 · 够用即停
+                                </span>
+                              ) : (
+                                <>
+                                  源 {completedSources}/{totalSources}
+                                </>
+                              )}
                               {isLoading && (
                                 <span className='inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-green-500'></span>
                               )}

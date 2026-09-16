@@ -18,6 +18,13 @@ export interface AdminConfig {
     DoubanImageProxy: string;
     DisableYellowFilter: boolean;
     FluidSearch: boolean;
+    // ── 搜索源调度：优先级 + 够用即停（详见 src/lib/search-fanout.ts）──
+    // 源按「手动权重降序 → 配置顺序」派发；命中源数或结果数达标就立即收手，
+    // 中止在途请求、不再检测后面的源。手机上等待时间由"最慢的源"变成"够用的那一刻"。
+    SearchEarlyStop?: boolean; // 够用即停总开关，默认 true
+    SearchEarlyStopMinSources?: number; // 命中多少个源算够用，默认 8
+    SearchEarlyStopMinResults?: number; // 或累计多少条结果算够用，默认 0 = 不看这个条件（只按命中源数收手）
+    SearchConcurrency?: number; // 同时检测多少个源，默认 20（必须有限，否则优先级无意义）
     // 弹幕配置
     DanmakuSourceType?: 'builtin' | 'custom';
     DanmakuApiBase: string;

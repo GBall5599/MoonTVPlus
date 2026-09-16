@@ -2,14 +2,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
-import { getDanmakuApiBaseUrl } from '@/lib/danmaku/config';
+import { danmakuFailureMessage, fetchFromDanmaku } from '@/lib/danmaku/proxy';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
-    const animeId = searchParams.get('animeId');
+    const animeId = request.nextUrl.searchParams.get('animeId');
 
     if (!animeId) {
       return NextResponse.json(
@@ -27,45 +26,46 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 从数据库读取弹幕配置
     const config = await getConfig();
-    const baseUrl = getDanmakuApiBaseUrl(config.SiteConfig);
+    const result = await fetchFromDanmaku(
+      config.SiteConfig,
+      `/api/v2/bangumi/${encodeURIComponent(animeId)}`,
+      { timeoutMs: 12000, label: '剧集' }
+    );
 
-    const apiUrl = `${baseUrl}/api/v2/bangumi/${animeId}`;
-
-    // 添加超时控制和重试机制
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 10秒超时
+    if (!result.ok) {
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: danmakuFailureMessage(result),
+          bangumi: {
+            bangumiId: '',
+            animeTitle: '',
+            episodes: [],
+          },
+        },
+        { status: 502 }
+      );
+    }
 
     try {
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
+      return NextResponse.json(JSON.parse(result.text));
+    } catch {
+      console.error(`[弹幕] 剧集：${result.sourceOrigin} 返回的不是 JSON`);
+      return NextResponse.json(
+        {
+          errorCode: -1,
+          success: false,
+          errorMessage: '弹幕服务返回了非 JSON 内容',
+          bangumi: {
+            bangumiId: '',
+            animeTitle: '',
+            episodes: [],
+          },
         },
-        signal: controller.signal,
-        // 添加 keepalive 避免连接被重置
-        keepalive: true,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      return NextResponse.json(data);
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-
-      // 如果是超时错误，返回更友好的错误信息
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        throw new Error('弹幕服务器请求超时，请稍后重试');
-      }
-
-      throw fetchError;
+        { status: 502 }
+      );
     }
   } catch (error) {
     console.error('获取剧集列表代理错误:', error);

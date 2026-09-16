@@ -185,8 +185,14 @@ function isTVModePath(pathname: string): boolean {
 }
 
 // 配置middleware匹配规则
+//
+// 注意：这里的 matcher 是一个「排除名单」——列进去的路径不经过会话 cookie 鉴权。
+// 所有以 `api/webhtv/` 开头的路由必须列进来：它们面向的是 Android App，
+// App 用的是 X-WebHTV-Token（由路由自己校验），没有浏览器会话 cookie。
+// 漏掉会导致 middleware 抢先对 /api/* 返回 401 "Unauthorized"，
+// 路由里的令牌校验分支根本执行不到 —— 表现为「同步桥怎么都连不上」。
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|login|register|oidc-register|qr-login|warning|tv/login|api/login|api/register|api/logout|api/auth/oidc|api/auth/qr|api/auth/refresh|api/telegram/login|api/telegram/config|api/telegram/webhook|api/cron/|api/server-config|api/proxy-m3u8|api/cms-proxy|api/tvbox/subscribe|api/theme/css|api/openlist/cms-proxy|api/openlist/play|api/openlist/proxy|api/emby/cms-proxy|api/emby/play|api/emby/subtitle|api/emby/sources|tvbox/).*)',
+    '/((?!_next/static|_next/image|favicon.ico|login|register|oidc-register|qr-login|warning|tv/login|api/login|api/register|api/logout|api/auth/oidc|api/auth/qr|api/auth/refresh|api/telegram/login|api/telegram/config|api/telegram/webhook|api/cron/|api/server-config|api/proxy-m3u8|api/cms-proxy|api/tvbox/subscribe|api/theme/css|api/openlist/cms-proxy|api/openlist/play|api/openlist/proxy|api/emby/cms-proxy|api/emby/play|api/emby/subtitle|api/emby/sources|tvbox/|api/webhtv/).*)',
   ],
 };

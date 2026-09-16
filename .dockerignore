@@ -6,3 +6,16 @@ public/screenshot3.png
 
 # Android/TV native app sources are not needed in Docker image builds
 apps/
+
+# ── 宿主的依赖绝不能进构建上下文 ──────────────────────────────────────────
+# Dockerfile 的 builder 阶段是：
+#     COPY --from=deps /app/node_modules ./node_modules   # 容器里 pnpm 装好的 linux 依赖
+#     COPY . .                                            # ← 会把宿主的 node_modules 合并覆盖上去
+# 在 Windows 上宿主的 node_modules 是给 win32 装的、而且是**不完整**的
+# （`node_modules/.bin` 缺失、pnpm junction 进不了 tar 上下文），
+# 合并后 next 就找不到了 —— 实测报错：
+#     Error: Cannot find module '/app/node_modules/next/dist/bin/next'
+# 于是 `pnpm run build` 直接失败。排除 node_modules 后镜像里的依赖 100% 来自
+# 容器内 pnpm install，干净且可复现（上下文也从 1.38 GB 降到约 250 MB）。
+node_modules
+.git

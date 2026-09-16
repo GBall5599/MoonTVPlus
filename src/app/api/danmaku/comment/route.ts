@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
-import { getDanmakuApiBaseUrl } from '@/lib/danmaku/config';
+import { danmakuFailureMessage, fetchFromDanmaku } from '@/lib/danmaku/proxy';
 
 export const runtime = 'nodejs';
 
@@ -49,60 +49,41 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 从数据库读取弹幕配置
+    // 从数据库读取弹幕配置，交给带备用源降级的代理（见 lib/danmaku/proxy.ts）
+    //
+    // 超时给到 30s：一集弹幕要上游现抓，实测冷取 7~17 秒（热门剧单集 4 万条），
+    // 给 10 秒会把正常但慢的请求误判成"源挂了"从而白白降级。
     const config = await getConfig();
-    const baseUrl = getDanmakuApiBaseUrl(config.SiteConfig);
+    const path = episodeId
+      ? `/api/v2/comment/${encodeURIComponent(episodeId)}?format=xml`
+      : `/api/v2/comment?url=${encodeURIComponent(url!)}&format=xml`;
+    const result = await fetchFromDanmaku(config.SiteConfig, path, {
+      accept: 'application/xml, text/xml',
+      timeoutMs: 30000,
+      label: '弹幕',
+    });
 
-    let apiUrl: string;
-
-    if (episodeId) {
-      // 通过剧集 ID 获取弹幕 - 使用 XML 格式
-      apiUrl = `${baseUrl}/api/v2/comment/${episodeId}?format=xml`;
-    } else {
-      // 通过视频 URL 获取弹幕 - 使用 XML 格式
-      apiUrl = `${baseUrl}/api/v2/comment?url=${encodeURIComponent(url!)}&format=xml`;
+    if (!result.ok) {
+      console.error(`[弹幕] 拉取失败：${danmakuFailureMessage(result)}`);
+      return NextResponse.json({ count: 0, comments: [] }, { status: 502 });
     }
 
-    // 添加超时控制
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2分钟超时
+    const xmlText = result.text;
 
-    try {
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/xml, text/xml',
-        },
-        signal: controller.signal,
-        keepalive: true,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      // 获取 XML 文本
-      const xmlText = await response.text();
-
-      // 解析 XML 为 JSON
-      const comments = parseXmlDanmaku(xmlText);
-
-      return NextResponse.json({
-        count: comments.length,
-        comments,
-      });
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-
-      // 如果是超时错误，返回更友好的错误信息
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        throw new Error('弹幕服务器请求超时，请稍后重试');
-      }
-
-      throw fetchError;
+    // 诊断：拿到了 200 但内容根本不是 XML（比如撞上错误页 / 登录页），
+    // 会被下面的解析器静默当成"0 条弹幕"，先在这里留个明确日志。
+    if (!/^\s*</.test(xmlText)) {
+      console.error(
+        `[弹幕] ${result.sourceOrigin} 返回 200 但不是 XML（前 80 字：${xmlText.slice(0, 80).replace(/\s+/g, ' ')}）`
+      );
     }
+
+    const comments = parseXmlDanmaku(xmlText);
+
+    return NextResponse.json({
+      count: comments.length,
+      comments,
+    });
   } catch (error) {
     console.error('获取弹幕代理错误:', error);
     return NextResponse.json(

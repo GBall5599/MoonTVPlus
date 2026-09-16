@@ -4,9 +4,14 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
-import { searchFromApi } from '@/lib/downstream';
 import { getProxyToken } from '@/lib/emby-token';
 import { hasFeaturePermission } from '@/lib/permissions';
+import {
+  buildWeightMap,
+  getFanoutSettings,
+  runSourceFanout,
+  sortSitesByPriority,
+} from '@/lib/search-fanout';
 import {
   executeSavedSourceScript,
   listEnabledSourceScripts,
@@ -53,10 +58,13 @@ export async function GET(request: NextRequest) {
   ]);
 
   // 创建权重映射表
-  const weightMap = new Map<string, number>();
-  config.SourceConfig.forEach(source => {
-    weightMap.set(source.key, source.weight ?? 0);
-  });
+  const weightMap = buildWeightMap(config.SourceConfig);
+
+  // 按优先级排序：手动权重降序 → 原始顺序
+  const sortedApiSites = sortSitesByPriority(apiSites, weightMap);
+
+  // 调度参数：受控并发 + 够用即停（非流式路径同样受益：不再等最慢的源）
+  const fanoutSettings = await getFanoutSettings();
 
   // 检查是否配置了 OpenList
   const hasOpenList = !!(
@@ -181,18 +189,28 @@ export async function GET(request: NextRequest) {
       })
     : Promise.resolve([]);
 
-  // 添加超时控制和错误处理，避免慢接口拖累整体响应
-  const searchPromises = apiSites.map((site) =>
-    Promise.race([
-      searchFromApi(site, query),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`${site.name} timeout`)), 20000)
-      ),
-    ]).catch((err) => {
-      console.warn(`搜索失败 ${site.name}:`, err.message);
-      return []; // 返回空数组而不是抛出错误
-    })
-  );
+  // API 源：受控并发 + 够用即停。命中源数/结果数达标即收手，
+  // 不再被最慢的几个源拖住整条响应。
+  const apiFanoutResults: any[] = [];
+  const apiFanoutPromise = runSourceFanout({
+    sites: sortedApiSites,
+    query,
+    concurrency: fanoutSettings.concurrency,
+    minHitSources: fanoutSettings.minHitSources,
+    minResults: fanoutSettings.minResults,
+    onSourceDone: ({ results }) => {
+      if (Array.isArray(results) && results.length > 0) {
+        apiFanoutResults.push(...results);
+      }
+    },
+  }).then((summary) => {
+    console.log(
+      `[Search] 扇出结束 「${query}」 检测=${summary.scannedSources} ` +
+        `命中源=${summary.hitSources} 结果=${summary.totalResults} ` +
+        `跳过=${summary.skippedSources} 早停=${summary.stopped} 耗时=${summary.elapsedMs}ms`
+    );
+    return apiFanoutResults;
+  });
 
   const scriptSummaries = privateOnly ? [] : await listEnabledSourceScripts();
   const scriptPromises = scriptSummaries.map((script) =>
@@ -247,20 +265,20 @@ export async function GET(request: NextRequest) {
     const allResults = await Promise.all([
       openlistPromise,
       ...embyPromises,
-      ...searchPromises,
+      apiFanoutPromise,
       ...scriptPromises,
     ]);
 
-    // 分离结果：第一个是 openlist，接下来是 emby 结果，最后是 api 结果
+    // 分离结果：第一个是 openlist，接着是 emby 结果，然后是 api 结果（已拍平），最后是脚本结果
     // 添加安全检查，确保即使某个结果处理出错也不影响其他结果
+    const apiIndex = 1 + embyPromises.length;
     const openlistResults = Array.isArray(allResults[0]) ? allResults[0] : [];
-    const embyResultsArray = allResults.slice(1, 1 + embyPromises.length);
-    const apiResults = allResults.slice(1 + embyPromises.length, 1 + embyPromises.length + searchPromises.length);
-    const scriptResults = allResults.slice(1 + embyPromises.length + searchPromises.length);
+    const embyResultsArray = allResults.slice(1, apiIndex);
+    const apiResultsFlat = Array.isArray(allResults[apiIndex]) ? allResults[apiIndex] : [];
+    const scriptResults = allResults.slice(apiIndex + 1);
 
     // 合并所有 Emby 结果，添加安全检查
     const embyResults = embyResultsArray.filter(Array.isArray).flat();
-    const apiResultsFlat = apiResults.filter(Array.isArray).flat();
     const scriptResultsFlat = scriptResults.filter(Array.isArray).flat();
 
     let flattenedResults = [...openlistResults, ...embyResults, ...apiResultsFlat, ...scriptResultsFlat];

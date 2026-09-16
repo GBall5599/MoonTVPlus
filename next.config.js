@@ -25,6 +25,26 @@ const createNextConfig = (phase) => {
   const nextConfig = {
   // Cloudflare Pages 不支持 standalone，使用默认输出
   output: isEdgeBuild ? undefined : 'standalone',
+
+  // 把 /manifest.json 交给运行时路由（src/app/pwa-manifest/route.ts）。
+  //
+  // 为什么需要这一步：
+  //   public/manifest.json 是 scripts/generate-manifest.js 在 `pnpm run build` 时
+  //   按当时的环境变量生成的 —— 站点名在那一刻就被写死了。
+  //   用户拉官方 Docker 镜像部署时，镜像里编的是默认名 MoonTVPlus，
+  //   之后在 .env 里设 NEXT_PUBLIC_SITE_NAME 只影响服务端渲染的网页，
+  //   改不动 manifest，于是 PWA 装到手机桌面后名字仍是 MoonTVPlus。
+  //
+  //   rewrite 到动态路由后，三种部署方式（Docker / 源码 / 本地）
+  //   都能在请求时读到当前品牌名，不再依赖构建顺序。
+  //
+  // 注意：路由目录必须叫不带点号的段名（pwa-manifest）。
+  //   最初建在 app/manifest.json/route.ts 是错的 —— 含点号的目录名不被识别为路由，
+  //   还和 public/manifest.json 撞车，实测直接 500。
+  async rewrites() {
+    return [{ source: '/manifest.json', destination: '/pwa-manifest' }];
+  },
+
   eslint: {
     dirs: ['src'],
     // 在生产构建时忽略 ESLint 错误

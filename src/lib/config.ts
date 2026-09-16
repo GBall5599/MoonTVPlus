@@ -285,6 +285,19 @@ async function getInitConfig(
       DisableYellowFilter:
         process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true',
       FluidSearch: process.env.NEXT_PUBLIC_FLUID_SEARCH !== 'false',
+      SearchEarlyStop:
+        process.env.NEXT_PUBLIC_SEARCH_EARLY_STOP !== 'false',
+      SearchEarlyStopMinSources:
+        Number(process.env.NEXT_PUBLIC_SEARCH_EARLY_STOP_MIN_SOURCES) || 8,
+      // 默认 0 = 不看"结果条数"这个条件，只按**命中源数**收手。
+      // 原因（实测）：有源对查询词做很松的子串匹配（例如「开心电影」对
+      // 「不存在的片子zzz」都能返回 200+ 条），一个人就能把条数阈值顶满，
+      // 于是搜索提前收手、真正有货的源根本没被检测到。按"源数"收手才是
+      // 用户真正想要的语义，也不会被单个噪声源绑架。
+      SearchEarlyStopMinResults:
+        Number(process.env.NEXT_PUBLIC_SEARCH_EARLY_STOP_MIN_RESULTS) || 0,
+      SearchConcurrency:
+        Number(process.env.NEXT_PUBLIC_SEARCH_CONCURRENCY) || 20,
       // 弹幕配置
       DanmakuSourceType: hasCustomDanmakuEnv ? 'custom' : 'builtin',
       DanmakuApiBase:
@@ -530,6 +543,10 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       DoubanImageProxy: '',
       DisableYellowFilter: false,
       FluidSearch: true,
+      SearchEarlyStop: true,
+      SearchEarlyStopMinSources: 8,
+      SearchEarlyStopMinResults: 0,
+      SearchConcurrency: 20,
       DanmakuSourceType: 'builtin',
       DanmakuApiBase: BUILTIN_DANMAKU_API_BASE,
       DanmakuApiToken: '87654321',
@@ -570,6 +587,38 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   }
   if (adminConfig.SiteConfig.DanmakuAutoLoadDefault === undefined) {
     adminConfig.SiteConfig.DanmakuAutoLoadDefault = true;
+  }
+  // 搜索源调度兜底：老配置升级上来时补齐"够用即停"参数
+  if (adminConfig.SiteConfig.SearchEarlyStop === undefined) {
+    adminConfig.SiteConfig.SearchEarlyStop = true;
+  }
+  {
+    const clampInt = (value: unknown, fallback: number, min: number, max: number) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(Math.max(Math.trunc(n), min), max);
+    };
+    adminConfig.SiteConfig.SearchEarlyStopMinSources = clampInt(
+      adminConfig.SiteConfig.SearchEarlyStopMinSources,
+      8,
+      1,
+      200
+    );
+    // 注意：0 是**合法值**（= 不看结果条数这一项），configSelfCheck 不能把它
+    // 当成"没配"而回填成 60。clampInt 走的是 Number.isFinite 判断，所以显式 0
+    // 会原样保留；这里的 fallback 只在字段**真的是 undefined** 时生效。
+    adminConfig.SiteConfig.SearchEarlyStopMinResults = clampInt(
+      adminConfig.SiteConfig.SearchEarlyStopMinResults,
+      0,
+      0,
+      10000
+    );
+    adminConfig.SiteConfig.SearchConcurrency = clampInt(
+      adminConfig.SiteConfig.SearchConcurrency,
+      20,
+      1,
+      500
+    );
   }
   if (adminConfig.SiteConfig.LiveChartProxy === undefined) {
     adminConfig.SiteConfig.LiveChartProxy = process.env.LIVECHART_PROXY || '';

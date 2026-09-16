@@ -41,6 +41,10 @@ export async function POST(request: NextRequest) {
       DoubanImageProxy,
       DisableYellowFilter,
       FluidSearch,
+      SearchEarlyStop,
+      SearchEarlyStopMinSources,
+      SearchEarlyStopMinResults,
+      SearchConcurrency,
       DanmakuSourceType,
       DanmakuApiBase,
       DanmakuApiToken,
@@ -104,6 +108,10 @@ export async function POST(request: NextRequest) {
       DoubanImageProxy: string;
       DisableYellowFilter: boolean;
       FluidSearch: boolean;
+      SearchEarlyStop?: boolean;
+      SearchEarlyStopMinSources?: number;
+      SearchEarlyStopMinResults?: number;
+      SearchConcurrency?: number;
       DanmakuSourceType?: 'builtin' | 'custom';
       DanmakuApiBase: string;
       DanmakuApiToken: string;
@@ -176,6 +184,19 @@ export async function POST(request: NextRequest) {
       typeof DoubanImageProxy !== 'string' ||
       typeof DisableYellowFilter !== 'boolean' ||
       typeof FluidSearch !== 'boolean' ||
+      (SearchEarlyStop !== undefined && typeof SearchEarlyStop !== 'boolean') ||
+      (SearchEarlyStopMinSources !== undefined &&
+        (typeof SearchEarlyStopMinSources !== 'number' ||
+          SearchEarlyStopMinSources < 1 ||
+          SearchEarlyStopMinSources > 200)) ||
+      (SearchEarlyStopMinResults !== undefined &&
+        (typeof SearchEarlyStopMinResults !== 'number' ||
+          SearchEarlyStopMinResults < 0 ||
+          SearchEarlyStopMinResults > 10000)) ||
+      (SearchConcurrency !== undefined &&
+        (typeof SearchConcurrency !== 'number' ||
+          SearchConcurrency < 1 ||
+          SearchConcurrency > 500)) ||
       (DanmakuSourceType !== undefined &&
         DanmakuSourceType !== 'builtin' &&
         DanmakuSourceType !== 'custom') ||
@@ -291,6 +312,10 @@ export async function POST(request: NextRequest) {
       DoubanImageProxy: normalizeApiBaseUrl(DoubanImageProxy),
       DisableYellowFilter,
       FluidSearch,
+      SearchEarlyStop,
+      SearchEarlyStopMinSources,
+      SearchEarlyStopMinResults,
+      SearchConcurrency,
       DanmakuSourceType,
       DanmakuApiBase: normalizeApiBaseUrl(DanmakuApiBase),
       DanmakuApiToken,
