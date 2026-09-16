@@ -297,6 +297,15 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       return digits.slice(-2).padStart(2, '0');
     }, [actualYear]);
 
+    // 海报下方、影片名下面那行年份（四位，如 2024）。
+    // 与上面的 displayYear 分开是有意的：displayYear 是海报右上角角标的两位缩写
+    // （"24年"），改它会动到已有 UI；这里只认 19xx/20xx，把源里的脏值挡掉。
+    const yearLabel = useMemo(() => {
+      if (!actualYear) return '';
+      const m = String(actualYear).match(/(?:19|20)\d{2}/);
+      return m ? m[0] : '';
+    }, [actualYear]);
+
     // 获取收藏状态（搜索结果页面不检查）
     useEffect(() => {
       if (from === 'douban' || from === 'search' || !actualSource || !actualId)
@@ -2011,6 +2020,28 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
                   >
                     {actualTitle}
                   </span>
+                  {/* 年份：海报下"影片名"下方（2026-09-16 站长要求）。
+                    源数据只给到年份（无完整上映日期），覆盖率 91~100%；
+                    顺带补上「单集电影没有年份角标」的缺口（那个角标被
+                    actualEpisodes > 1 卡着，电影一直看不到年份）。 */}
+                  {yearLabel && (
+                    <div
+                      className='mt-0.5 text-[11px] leading-tight text-gray-500 dark:text-gray-400 truncate'
+                      style={
+                        {
+                          WebkitUserSelect: 'none',
+                          userSelect: 'none',
+                          WebkitTouchCallout: 'none',
+                        } as React.CSSProperties
+                      }
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        return false;
+                      }}
+                    >
+                      {yearLabel}
+                    </div>
+                  )}
                   {/* 自定义 tooltip */}
                   <div
                     className='absolute bottom-full left-1/2 z-[70] mb-2 w-max max-w-[min(20rem,calc(100vw-2rem))] -translate-x-1/2 rounded-md bg-gray-800 px-3 py-1 text-center text-xs text-white shadow-lg opacity-0 invisible peer-hover:opacity-100 peer-hover:visible transition-all duration-200 ease-out delay-100 whitespace-normal break-words pointer-events-none'
