@@ -806,10 +806,159 @@ class TVRemoteServer {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 兼容性自检探针 /__compat
+//
+// 为什么要有它：站长的 2345 浏览器报了一串只在老内核上出现的问题（封面不显示、
+// 点影片报「连接已重置」、换源/弹幕面板文字看不清、选集点不动）。这类问题无法
+// 在本机复现 —— 必须拿到**那台浏览器自己的**内核版本、CSS 支持情况、接口连通性
+// 与页面实测尺寸。这个探针让站长只做一件事：打开 `http://<站点>/__compat`，
+// 页面自检后把 JSON POST 回来，服务端打进容器日志，然后用
+// `docker logs mytv-core | grep '\[compat\]'` 直接读结论 —— 不用再靠猜。
+//
+// 安全：只记录、不回显；请求体上限 8KB；只打印 UA + 路径，不打印查询串
+// （站点 URL 里带了片源 id 之类的参数，没必要进日志）。
+// ---------------------------------------------------------------------------
+const COMPAT_BODY_LIMIT = 8 * 1024;
+
+function sendCompatReport(req, res) {
+  let body = '';
+  let aborted = false;
+  req.on('data', (chunk) => {
+    if (aborted) return;
+    body += chunk;
+    if (body.length > COMPAT_BODY_LIMIT) {
+      aborted = true;
+      res.statusCode = 413;
+      res.end('too large');
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    if (aborted) return;
+    console.log(`[compat] ${body.slice(0, COMPAT_BODY_LIMIT)}`);
+    res.statusCode = 204;
+    res.setHeader('Cache-Control', 'no-store');
+    res.end();
+  });
+}
+
+function compatPage() {
+  // 说明：这一页必须是**纯 ES5**（var / function / 字符串拼接，不用箭头函数、
+  // 模板字符串、const/let），否则老内核加载它就 SyntaxError，探针自己先挂了。
+  return [
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<title>浏览器兼容性自检</title>',
+    '<style>',
+    'body{font:14px/1.6 -apple-system,"Segoe UI",sans-serif;margin:0;padding:16px;background:#0f172a;color:#e2e8f0}',
+    'h1{font-size:17px;margin:0 0 4px}p.sub{color:#94a3b8;margin:0 0 14px}',
+    'table{border-collapse:collapse;width:100%;max-width:860px;margin-bottom:18px}',
+    'td,th{border:1px solid #334155;padding:4px 8px;text-align:left;vertical-align:top}',
+    'th{background:#1e293b;width:210px;font-weight:600}',
+    '.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}',
+    'code{color:#93c5fd}#state{margin:12px 0;padding:10px;border-radius:6px;background:#1e293b}',
+    'iframe{position:fixed;left:-2200px;top:0;width:1280px;height:1000px;border:0}',
+    '</style></head><body>',
+    '<h1>浏览器兼容性自检</h1>',
+    '<p class="sub">本页在你的浏览器里跑一遍特征检测，并把结果回传给服务器日志（站长无需操作）。</p>',
+    '<div id="state">检测中…</div><div id="out"></div>',
+    '<iframe id="probe" src="/"></iframe>',
+    '<script>',
+    'var R={};var pending=0;var T0=Date.now();',
+    'function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}',
+    // T(): 同步项直接取值；返回 Promise 的异步项登记到 pending，落地后再补表。
+    'function T(name,fn){var v;try{v=fn()}catch(e){v="throw: "+(e&&e.message)}',
+    'if(v&&typeof v.then==="function"){pending++;R[name]="…检测中";v.then(function(x){R[name]=x;pending--;render()},function(e){R[name]="rejected: "+(e&&e.message);pending--;render()})}',
+    'else{R[name]=v}return v}',
+    'function cls(v){return v===true?"ok":v===false?"bad":"warn"}',
+    'function row(k,v){var s=(v&&typeof v==="object")?JSON.stringify(v):String(v);return "<tr><th>"+esc(k)+"</th><td class=\\""+cls(v)+"\\">"+esc(s)+"</td></tr>"}',
+    'function render(){var h="";for(var k in R){h+=row(k,R[k])}document.getElementById("out").innerHTML="<table>"+h+"</table>"}',
+    // —— 环境 ——
+    'T("userAgent",function(){return navigator.userAgent});',
+    'T("平台",function(){return navigator.platform+" / "+navigator.vendor});',
+    'T("视口",function(){return window.innerWidth+"x"+window.innerHeight+" dpr="+window.devicePixelRatio});',
+    'T("html class（主题）",function(){return document.documentElement.className||"(空=浅色)"});',
+    'T("系统深色偏好",function(){return window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches});',
+    'T("cookie 可用",function(){document.cookie="__c=1;path=/";var ok=document.cookie.indexOf("__c=1")>=0;document.cookie="__c=;max-age=0;path=/";return navigator.cookieEnabled&&ok});',
+    // —— 老内核关键 API（true 才正常）——
+    'T("Array.prototype.at",function(){return typeof [].at==="function"});',
+    'T("Object.hasOwn",function(){return typeof Object.hasOwn==="function"});',
+    'T("URL.canParse",function(){return typeof URL.canParse==="function"});',
+    'T("String.replaceAll",function(){return typeof "".replaceAll==="function"});',
+    'T("structuredClone",function(){return typeof structuredClone==="function"});',
+    'T("Promise.allSettled",function(){return typeof Promise.allSettled==="function"});',
+    'T("ResizeObserver",function(){return typeof ResizeObserver==="function"});',
+    'T("IntersectionObserver",function(){return typeof IntersectionObserver==="function"});',
+    'T("AbortController",function(){return typeof AbortController==="function"});',
+    // —— CSS：既查 CSS.supports，也做**真实测量**（supports 在某些内核上不可靠）——
+    'T("CSS.supports(aspect-ratio)",function(){return CSS.supports&&CSS.supports("aspect-ratio","2/3")});',
+    'T("实测 aspect-ratio",function(){var d=document.createElement("div");d.style.cssText="width:100px;aspect-ratio:2/3";document.body.appendChild(d);var h=d.offsetHeight;d.parentNode.removeChild(d);return h===150?"150 ✓":("高 "+h+" ✗（应为 150）")});',
+    'T("实测 inset:0",function(){var o=document.createElement("div");o.style.cssText="position:relative;width:50px;height:50px";var i=document.createElement("div");i.style.cssText="position:absolute;inset:0";o.appendChild(i);document.body.appendChild(o);var w=i.offsetWidth;o.parentNode.removeChild(o);return w===50?"50 ✓":("宽 "+w+" ✗（应为 50）")});',
+    'T("实测 flex gap",function(){var o=document.createElement("div");o.style.cssText="display:flex;gap:10px;position:absolute;left:-9999px";for(var n=0;n<2;n++){var c=document.createElement("div");c.style.cssText="width:10px;height:10px";o.appendChild(c)}document.body.appendChild(o);var gap=o.children[1].offsetLeft-o.children[0].offsetLeft;o.parentNode.removeChild(o);return gap===20?"20 ✓":(gap+" ✗（应为 20）")});',
+    'T("CSS.supports(:is())",function(){return CSS.supports&&CSS.supports("selector(:is(a))")});',
+    // —— Service Worker（上一版它给导航/接口套了 10 秒超时，是主要故障源）——
+    'T("SW 支持",function(){return "serviceWorker" in navigator});',
+    'T("SW 已注册数",function(){if(!navigator.serviceWorker||!navigator.serviceWorker.getRegistrations)return "不支持";return new Promise(function(r){navigator.serviceWorker.getRegistrations().then(function(l){r(l.length+" 个"+(l[0]&&l[0].active?" / "+l[0].active.scriptURL:""))}).catch(function(e){r("查询失败: "+e.message)})})});',
+    'T("SW 正在接管本页",function(){return !!(navigator.serviceWorker&&navigator.serviceWorker.controller)});',
+    'render();',
+    // —— 接口与图片连通性 ——
+    'function xhr(url,ms,cb){var x=new XMLHttpRequest();var t0=Date.now();var done=false;x.open("GET",url,true);x.timeout=ms;x.onreadystatechange=function(){if(done)return;if(x.readyState===4){done=true;cb(x.status,Date.now()-t0)}};x.ontimeout=function(){if(done)return;done=true;cb("timeout",Date.now()-t0)};x.onerror=function(){if(done)return;done=true;cb("network-error",Date.now()-t0)};x.send()}',
+    'function imgTest(url,ms,cb){var im=new Image();var t0=Date.now();var done=false;var fin=function(r){if(done)return;done=true;cb(r,Date.now()-t0)};var timer=setTimeout(function(){fin("timeout")},ms);im.onload=function(){clearTimeout(timer);fin("ok "+im.naturalWidth+"x"+im.naturalHeight)};im.onerror=function(){clearTimeout(timer);fin("error")};im.src=url}',
+    'T("接口 /api/server-config",function(){return new Promise(function(r){xhr("/api/server-config",15000,function(s,ms){r(s+" / "+ms+"ms")})})});',
+    'T("同源图片 /logo.png",function(){return new Promise(function(r){imgTest("/logo.png",15000,function(s,ms){r(s+" / "+ms+"ms")})})});',
+    'T("跨域图片（豆瓣海报）",function(){return new Promise(function(r){imgTest("https://img1.doubanio.com/view/photo/s_ratio_poster/public/p480747492.jpg",20000,function(s,ms){r(s+" / "+ms+"ms")})})});',
+    // —— 真实页面实测：把首页放进 iframe 量尺寸（同源可直接读 DOM）——
+    'function probeFrame(){try{var f=document.getElementById("probe");var d=f.contentDocument;if(!d){R["首页实测"]="读不到 iframe 文档";render();return}var imgs=d.querySelectorAll("img");var total=imgs.length,loaded=0,zero=0,zeroList=[];for(var i=0;i<total&&i<80;i++){var im=imgs[i];if(im.naturalWidth>0)loaded++;var box=im.parentElement;var h=box?box.offsetHeight:0;if(h===0){zero++;if(zeroList.length<3)zeroList.push((im.currentSrc||im.src||"").slice(0,90))}}R["首页实测"]="标题「"+(d.title||"")+"」 / img "+total+" 个 / 载入成功 "+loaded+" / 容器高度为 0 的 "+zero;R["零高度样例"]=zeroList.length?zeroList:"(无)";R["首页 html class"]=d.documentElement.className||"(空=浅色)"}catch(e){R["首页实测"]="异常: "+(e&&e.message)}render()}',
+    'setTimeout(probeFrame,4500);',
+    // 等所有异步项落地 + iframe 实测完成再回传；最迟 26 秒兜底。
+    'function post(){var payload={};for(var k in R){payload[k]=R[k]}payload.href=location.href.split("?")[0];var x=new XMLHttpRequest();x.open("POST","/__compat",true);x.setRequestHeader("Content-Type","application/json");try{x.send(JSON.stringify(payload))}catch(e){}document.getElementById("state").innerHTML="<b>已回传服务器日志</b>（日志里查 <code>[compat]</code>）。<span class=\\"ok\\">正常</span> / <span class=\\"bad\\">异常</span> / <span class=\\"warn\\">未知</span>"}',
+    'function maybePost(){var el=Date.now()-T0;if((pending===0&&el>6000)||el>26000){post();return}setTimeout(maybePost,500)}',
+    'setTimeout(maybePost,6000);',
+    '<' + '/script></body></html>',
+  ].join('\n');
+}
+
+/** 只记录「页面导航」与「失败请求」，音量很小；只打路径不打查询串。 */
+function logAccess(req, res) {
+  const started = Date.now();
+  res.on('finish', () => {
+    const isDocument = (req.headers.accept || '').includes('text/html');
+    const failed = res.statusCode >= 400;
+    if (!isDocument && !failed) return;
+    let pathname = req.url || '';
+    const q = pathname.indexOf('?');
+    if (q >= 0) pathname = pathname.slice(0, q);
+    if (pathname.startsWith('/_next/')) return;
+    const ua = (req.headers['user-agent'] || '').slice(0, 140);
+    console.log(
+      `[access] ${req.method} ${pathname} ${res.statusCode} ${Date.now() - started}ms ua="${ua}"`
+    );
+  });
+}
+
+const ACCESS_LOG_ENABLED = process.env.MYTV_ACCESS_LOG !== 'false';
+
 app.prepare().then(async () => {
   const httpServer = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url, true);
+
+      // 兼容性自检探针（不走 Next，也不需要登录）
+      if (parsedUrl.pathname === '/__compat') {
+        if (req.method === 'POST') {
+          sendCompatReport(req, res);
+        } else {
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(compatPage());
+        }
+        return;
+      }
+
+      if (ACCESS_LOG_ENABLED) logAccess(req, res);
+
       await handle(req, res, parsedUrl);
     } catch (err) {
       console.error('Error occurred handling', req.url, err);
@@ -817,6 +966,15 @@ app.prepare().then(async () => {
       res.end('Internal server error');
     }
   });
+
+  // ── keep-alive 竞态：老浏览器「连接已重置」的一个常见根因 ──────────────
+  // Node 默认 keepAliveTimeout 只有 5 秒：空闲超时后服务器单方面关掉连接，
+  // 而浏览器可能恰好在同一瞬间复用这条连接发请求，于是内核回 RST，
+  // 浏览器报 ERR_CONNECTION_RESET。现代 Chrome 会自动换连接重试掩盖了它，
+  // 老内核（国产双核浏览器）不一定重试，就直接把错误摊到用户脸上。
+  // 把空闲超时抬到 65 秒即可让"服务器先关"这件事基本不再发生。
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 66_000;
 
   // 读取观影室配置
   const watchRoomConfig = await getWatchRoomConfig();

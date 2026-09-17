@@ -148,8 +148,28 @@ export function GlobalErrorIndicator() {
 }
 
 // 全局错误触发函数
+//
+// 同一条消息在 ERROR_DEDUPE_MS 内只弹一次。
+// 为什么需要：后台同步类失败（播放记录/收藏/弹幕配置…）会在每次渲染或轮询时重试，
+// 一失败就弹一次红条，右上角会被刷成"不断提示"，真正要看的信息反而被盖住
+// —— 这是站长实际反馈的现象。调用点的 console.warn 不受影响，排查看控制台即可。
+const ERROR_DEDUPE_MS = 60_000;
+const lastShownAt = new Map<string, number>();
+
 export function triggerGlobalError(message: string) {
   if (typeof window !== 'undefined') {
+    const now = Date.now();
+    const last = lastShownAt.get(message) || 0;
+    if (now - last < ERROR_DEDUPE_MS) {
+      return;
+    }
+    lastShownAt.set(message, now);
+    if (lastShownAt.size > 50) {
+      lastShownAt.forEach((t, key) => {
+        if (now - t >= ERROR_DEDUPE_MS) lastShownAt.delete(key);
+      });
+    }
+
     window.dispatchEvent(
       new CustomEvent('globalError', {
         detail: { message },

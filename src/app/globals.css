@@ -334,3 +334,54 @@ div[data-media-provider] video {
     transition: none;
   }
 }
+
+/* ============================================================================
+ * 老内核兜底 —— aspect-ratio 占位 hack
+ * ============================================================================
+ * 背景：2345 / QQ / 搜狗这类国产双核浏览器的"极速内核"常停在 Chromium 63~87，
+ * 而 `aspect-ratio` 要 Chrome 88+。**失效的后果不是"没有比例"，而是容器高度为 0**
+ * —— 卡片海报层是 `absolute inset-0` + `next/image fill`（宽高 100%），
+ * 父容器一没高度，整张海报就完全看不见，表现为"封面加载不出来"。
+ *
+ * 为什么这类兜底没有放进 postcss-legacy-compat：
+ *   `inset:` / `:where()` 那几类可以**等价比替换**，构建期改写干净利落；
+ *   而 aspect-ratio 只能靠 padding 占位，属于"加一个伪元素"的行为变更，
+ *   必须只在老内核上生效 —— 所以用 @supports 包起来（新内核下整块不生效）。
+ *
+ * 为什么用 `width: 0` 的 ::before 而不是给容器设 height：
+ *   · padding-top 的百分比是按**包含块宽度**解析的，与 ::before 自身宽度无关；
+ *   · 容器若是 flex（例如漫画详情的 `flex aspect-[3/4] flex-col items-center`），
+ *     `width: 100%` 的伪元素会变成一个占满整行的 flex item，把正文挤走；
+ *     `width: 0` 则只贡献高度，几乎不影响横向排布。
+ *   · 对 `<img className="aspect-[2/3]">` 这种写法，伪元素在替换元素上不渲染，
+ *     自动成为空操作（图片本来就有自己的固有比例）。
+ *
+ * 这一整块将来可以删掉：等确认所有用户浏览器都不低于 Chrome 88。
+ * ========================================================================== */
+@supports not (aspect-ratio: 1 / 1) {
+  .aspect-\[2\/3\]::before,
+  .aspect-\[3\/2\]::before,
+  .aspect-\[3\/4\]::before,
+  .aspect-square::before {
+    content: '';
+    display: block;
+    width: 0;
+  }
+
+  .aspect-\[2\/3\]::before {
+    padding-top: 150%;
+  }
+
+  .aspect-\[3\/2\]::before {
+    padding-top: 66.6667%;
+  }
+
+  .aspect-\[3\/4\]::before {
+    padding-top: 133.3333%;
+  }
+
+  .aspect-square::before {
+    padding-top: 100%;
+  }
+}
+

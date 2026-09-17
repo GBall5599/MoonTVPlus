@@ -2,6 +2,15 @@
   "name": "moontv",
   "version": "0.1.0",
   "private": true,
+  "//browserslist": "CSS 侧的降级目标：autoprefixer / Next 内置的 postcss 预设都读它（见 next/dist/build/webpack/config/blocks/css/plugins.js），声明成实际要支持的老内核，前缀才会补对。⚠️ 实测更正（2026-09-17）：Next 14 虽然会读这里（next/dist/build/utils.js:1552 getSupportedBrowsers → swc/options.js:328 env.targets），但**客户端产物里的可选链 ?. / 空值合并 ?? 并没有被降级** —— 改动前后分片里 ?. 分别是 406 / 411 处，基本不变。也就是说这个字段管不到『让老内核能解析整包 JS』，实际最低要求仍由 Next 自带的那批预打包依赖决定（?. 要 Chrome 80+）。真正修好 2345 那台的是 postcss-legacy-compat.js（CSS）与 runtimeCaching: []（Service Worker），不是这里。保留本字段是为了 CSS 目标正确、也便于将来接别的工具。",
+  "browserslist": [
+    "chrome >= 64",
+    "edge >= 79",
+    "firefox >= 67",
+    "opera >= 51",
+    "safari >= 12",
+    "not dead"
+  ],
   "scripts": {
     "dev": "pnpm gen:manifest && node server.js",
     "build": "pnpm gen:manifest && next build",

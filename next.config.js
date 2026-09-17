@@ -227,6 +227,26 @@ const createNextConfig = (phase) => {
     register: true,
     skipWaiting: true,
     importScripts: ['/push-sw.js'],
+    // ⚠ 关掉 next-pwa 的默认运行时缓存表（defaultCache），这是**必须的**，原因：
+    //
+    // defaultCache 会给三类请求都套上 `NetworkFirst + networkTimeoutSeconds: 10`：
+    //   1. 同源非 API 的 GET —— **包含整页导航**；
+    //   2. `/api/*`（GET）；
+    //   3. 所有跨域 GET（含豆瓣/CMS 的海报图）。
+    // 含义是：**只要 10 秒内没回应，Service Worker 就中止这次请求**，然后回退到缓存；
+    // 缓存里没有就直接失败。而本站大量请求本来就是"慢但会成功"的：
+    // 播放页要现场去 CMS 抓详情（慢源 10~20 秒）、弹幕冷取一集 7~8 秒、
+    // 海报图床在高峰期也会打嗝。于是表现为：
+    //   · 点影片 → 导航被中止 → 浏览器报「访问失败 / 连接已重置」；
+    //   · 右上角反复弹「后台同步播放记录失败」（/api/playrecords 被中止）；
+    //   · 部分封面裂开（跨域图被中止，缓存里又没有）。
+    // 另外这些缓存还会**留下 24 小时的陈旧响应**（API/页面都在内），
+    // 造成"看到的数据不对、界面像旧版本"。
+    //
+    // 置空后 SW 只保留 precache（预缓存静态资源），离线静态资源、PWA 安装、
+    // push-sw.js 推送都不受影响；所有请求走网络，超时规则回归浏览器默认
+    // （宽松得多，不会再出现"9 秒成功却被判失败"）。
+    runtimeCaching: [],
   });
 
   return withPWA(nextConfig);
