@@ -38,10 +38,44 @@
 /** 能匹配一层嵌套括号的伪类参数（够用：我们的场景最多一层）。 */
 const ARG = String.raw`\(([^()]*(?:\([^()]*\)[^()]*)*)\)`;
 
+/**
+ * `dark:` 变体的外壳 → 等价旧写法。
+ *
+ * ⚠️ 这里**不能**简单地把 `:is(...)` 整个删掉再补一个空格 —— 这是一个已经踩过的坑，
+ * 而且后果特别隐蔽，记录在此：
+ *
+ *   Tailwind 产出：`.dark\:bg-black:is(.dark *)`
+ *   期望：         `.dark .dark\:bg-black`        （.dark 后代里带该工具类的元素）
+ *   实际（旧实现）：`.dark\:bg-black.dark *`       ← 完全另一个选择器，什么都不匹配
+ *
+ * 原因是 `:is(.dark *)` 的**参数本身以空格结尾**（`.dark ` + `*`），而旧实现是
+ * 「把整个 `:is(...)` 换成一个空格」，同时丢掉了参数里那个空格；随后
+ * `\s{2,} → ' '` 又把 `*` 前面的空格一并吃掉，于是 `*` 被粘成了类名的一部分。
+ * 因为 `replace` 的 lastIndex 在连续匹配间前进，**相邻的连续规则会一条好一条坏**，
+ * 表现为"大约一半深色样式失效"——深色模式于是退化成"浅色背景 + 深色文字"。
+ *
+ * 等价性推导（`X:is(.dark *)`，X 为该工具类的类名）：
+ *   原生语义 —— 元素匹配 X，**且它是某个 `.dark` 的后代**。
+ *   本站 `.dark` 只由 next-themes 加在 `<html>` 上（`attribute='class'`），
+ *   而 `html` 的后代 ≡ 页面里任何元素，所以内层那个 `*` 是冗余的：
+ *       `X:is(.dark *)` ≡ `.dark X`
+ *   `:is()` 的特异性取参数中最高者（`.dark *` → 0,1,0），换成 `.dark` 后仍是 0,1,0，
+ *   层叠关系不变。
+ *
+ * 因此正确做法是：**先删掉整个外壳（含参数里那个空格），再在整条选择器最前面
+ * 前置 `.dark `**。注意是"最前面"——外壳出现在选择器中部（如
+ * `.dark\:divide-gray-700:is(.dark *) > :not([hidden]) ~ :not([hidden])`），
+ * 原地的位置必须留空，否则 `> …` 这些后续组合符会跟错主人。
+ *
+ * 若哪天 `.dark` 被挂到了非 `<html>` 的嵌套元素上，这里的等价性就不再成立，
+ * 需要改回「把参数原样前置」的写法（`.dark *` 整体前置到 X 之前）。
+ */
 const DARK_FORMS = [
-  new RegExp(String.raw`:is\(\.dark \*\)`, 'g'),
-  new RegExp(String.raw`:where\(\.dark, \.dark \*\)`, 'g'),
-  new RegExp(String.raw`:is\(\.dark, \.dark \*\)`, 'g'),
+  // `X:is(.dark *)` → 就地留空，由 lowerSelector 在最前面补 `.dark `
+  { re: new RegExp(String.raw`:is\(\s*\.dark\s*\*\s*\)`, 'g'), to: ' ' },
+  // Tailwind v4 形态：`X:where(.dark, .dark *)` 同样处理
+  { re: new RegExp(String.raw`:where\(\s*\.dark\s*(?:,|,?\s+)\s*\*?\s*,?\s*\)`, 'g'), to: ' ' },
+  { re: new RegExp(String.raw`:is\(\s*\.dark\s*(?:,|,?\s+)\s*\*?\s*,?\s*\)`, 'g'), to: ' ' },
 ];
 
 const RE_NOT_LIST = new RegExp(String.raw`:not${ARG}`, 'g');
@@ -123,14 +157,13 @@ function expandIsAlternatives(selector, depth = 0) {
 function lowerSelector(selector) {
   let out = selector;
   let dark = false;
-  for (const re of DARK_FORMS) {
+  for (const { re, to } of DARK_FORMS) {
+    // 就地留空占位（保住的只是分隔作用），真正的 `.dark ` 前缀在最后补。
+    // 详见 DARK_FORMS 上方那段踩坑说明：外壳出现在选择器中部时不能就地替换成
+    // `.dark`，否则后续的 `>` / `+` / `~` 会挂到错误的主人身上。
     if (re.test(out)) {
       dark = true;
-      // 只摘掉这一个伪类，并用**单个空格**补位（保持 token 之间原有关系）。
-      // ⚠ 千万不要在这里做"给组合符补空格"之类的美化：属性选择器里的
-      // `[class~=not-prose]` 含 `~`，会被误改写成 `[class ~ =not-prose]`，
-      // 选择器直接失效（这个坑踩过一次）。
-      out = out.replace(new RegExp(re.source, 'g'), ' ');
+      out = out.replace(new RegExp(re.source, 'g'), to);
     }
   }
   out = unwrapOne(out);
