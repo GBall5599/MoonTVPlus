@@ -68,6 +68,9 @@ public/workbox-*.js.map
 *.db-shm
 *.db-wal
 
+# 本仓库内的临时产物（CSS 探针输出、构建中间物等），不留进版本库
+.cache/
+
 # local scripts
 scripts/tvbox/
 scripts/test

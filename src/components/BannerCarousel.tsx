@@ -673,11 +673,17 @@ export default function BannerCarousel({
         <ChevronRight className='w-8 h-8' />
       </button>
 
-      {/* 音量控制按钮 - 只在有豆瓣预告片时显示 */}
+      {/* 音量控制按钮 - 只在有豆瓣预告片时显示。
+          ⚠ 桌面端的 top 偏移不能只写 md:top-4：PageLayout 现在把顶栏固定在视口顶部
+          （高 48px + 1px 边框，main 上留了 49px），而大图区又从 main 顶部开始，
+          所以 md:top-4 会让这个按钮正好躲在顶栏那层半透明底下面 —— 看得见形状却看不清
+          图标，点击还能穿透（顶栏是 pointer-events-none）但体验很怪。
+          改到 md:top-[3.25rem]（52px）让它落在顶栏之下。移动端保持 top-2：
+          MobileHeader 是 h-12 且 main 已有 mt-[calc(3rem+…)]，本来就不重叠。 */}
       {currentItem.trailer_url && enableTrailers && (
         <button
           onClick={toggleMute}
-          className='absolute top-2 right-2 md:top-4 md:right-4 w-8 h-8 md:w-10 md:h-10 bg-black/30 hover:bg-black/60 text-white rounded-full flex items-center justify-center transition-all duration-300 z-10'
+          className='absolute top-2 right-2 md:top-[3.25rem] md:right-4 w-8 h-8 md:w-10 md:h-10 bg-black/30 hover:bg-black/60 text-white rounded-full flex items-center justify-center transition-all duration-300 z-10'
           aria-label={isMuted ? '开启声音' : '关闭声音'}
         >
           {isMuted ? (
